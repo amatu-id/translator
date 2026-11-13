@@ -26,6 +26,35 @@
   const ic = (n, c) => `<svg class="i${c ? ' ' + c : ''}" aria-hidden="true"><use href="#i-${n}"/></svg>`;
   const base = (c) => String(c || '').toLowerCase().split('-')[0];
   const norm = (s) => String(s || '').toLowerCase().replace(/[\s.,!?;:'"“”‘’。，、！？]+/g, ' ').trim();
+  const within = (p, ms) => Promise.race([p, new Promise((_, no) => setTimeout(() => no(new Error('timeout')), ms))]);
+  const STANDALONE = !!(navigator.standalone || (window.matchMedia && matchMedia('(display-mode: standalone)').matches));
+
+  // ---------- catatan teknis (tanpa isi percakapan) ----------
+  // What the microphone and voice did on this device, so a phone that misbehaves can be diagnosed from the account
+  // data (localStorage translator.dbg.<device>, synced by /amatu.js, kept under 2 KB). Never contains speech text.
+  const T0 = now(), DBG = [];
+  const DEVKEY = IOS ? 'ios' : ANDROID ? 'android' : 'desktop';
+  const devName = () => {
+    const ios = /OS (\d+)_(\d+)/.exec(UA), and = /Android ([\d.]+)/.exec(UA);
+    const cr = /Chrome\/(\d+)/.exec(UA), sf = /Version\/([\d.]+).*Safari/.exec(UA);
+    const br = /CriOS/.test(UA) ? 'Chrome' : /FxiOS/.test(UA) ? 'Firefox' : /EdgiOS|EdgA|Edg\//.test(UA) ? 'Edge' : /SamsungBrowser/.test(UA) ? 'Samsung' :
+      cr ? 'Chrome ' + cr[1] : sf ? 'Safari ' + sf[1] : 'other';
+    return (ios ? 'iOS ' + ios[1] + '.' + ios[2] : and ? 'Android ' + and[1] : navigator.platform) + ' ' + br + (STANDALONE ? ' homescreen' : '');
+  };
+  let dbgT = 0;
+  function log(m) {
+    DBG.push(((now() - T0) / 1000).toFixed(1) + ' ' + m);
+    if (DBG.length > 90) DBG.shift();
+    if (!dbgT) dbgT = setTimeout(saveDbg, 4000);
+  }
+  function saveDbg() {
+    clearTimeout(dbgT); dbgT = 0;
+    const head = `${new Date(T0).toISOString().slice(0, 16)} ${devName()} sr:${SRC ? 1 : 0} wake:${'wakeLock' in navigator ? 1 : 0}`;
+    const lines = DBG.slice();
+    let s = head + '\n' + lines.join('\n');
+    while (s.length > 1800 && lines.length) { lines.shift(); s = head + '\n' + lines.join('\n'); }
+    try { localStorage.setItem('translator.dbg.' + DEVKEY, s); } catch { }
+  }
 
   // ---------- bahasa ----------
   const LANGS = window.TR_LANGS.map(([k, g, n, nn, e, sr, w]) => ({ k, g, n, nn, e, sr, w }));
@@ -354,31 +383,78 @@
   function speakNet(text, l, gen) {   // Google's voice when the device has none for this language
     return new Promise((res) => {
       const parts = chunks(text, 190), code = /-/.test(l.k) ? l.k : l.g;
-      let i = 0;
-      const done = (ok) => { au.onended = au.onerror = null; res(ok); };
+      let i = 0, guard = 0, fin = false;
+      const done = (ok) => { if (fin) return; fin = true; clearTimeout(guard); au.onended = au.onerror = null; res(ok); };
       const next = () => {
+        clearTimeout(guard);
         if (gen !== sayGen || i >= parts.length) return done(true);
-        au.src = 'https://translate.googleapis.com/translate_tts?client=gtx&ie=UTF-8&tl=' + encodeURIComponent(code) + '&q=' + encodeURIComponent(parts[i++]);
+        const part = parts[i++];
+        au.src = 'https://translate.googleapis.com/translate_tts?client=gtx&ie=UTF-8&tl=' + encodeURIComponent(code) + '&q=' + encodeURIComponent(part);
         au.defaultPlaybackRate = au.playbackRate = cfg.rate;
         au.onended = next;
         au.onerror = () => done(false);
+        // a stalled download or a play() that never settles must not keep the microphone paused
+        guard = setTimeout(() => { try { au.pause(); } catch { } done(false); }, 9000 + part.length * 150 / cfg.rate);
         const p = au.play();
         if (p && p.catch) p.catch(() => done(false));
       };
       next();
     });
   }
+  // iPhone while listening: speech is played through the page's own audio context, the one the recorder uses.
+  // System speech and <audio> make iOS switch audio sessions, which leaves that context suspended or "interrupted"
+  // (and system speech next to an open microphone comes out of the earpiece). Google's voice comes through the
+  // edge function because Google's audio has no CORS header. Resumed before every part (iOS suspends it).
+  let ctxSrc = null;
+  function decode(ctx, b) { return new Promise((ok, no) => { const p = ctx.decodeAudioData(b, ok, no); if (p && p.catch) p.catch(no); }); }
+  async function speakCtx(text, l, gen) {
+    const ctx = Ear.ctx();
+    if (!ctx || !tok()) return false;
+    const parts = chunks(text, 190), code = /-/.test(l.k) ? l.k : l.g;
+    const get = (q) => fetch(EDGE + '/tts', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'x-amatu': tok() },
+      body: JSON.stringify({ tl: code, q, s: cfg.rate }), signal: tmo(10000),
+    }).then((r) => { if (!r.ok) throw new Error('tts ' + r.status); return r.arrayBuffer(); }).then((b) => decode(ctx, b));
+    let next = get(parts[0]);
+    for (let i = 0; i < parts.length; i++) {
+      let buf;
+      try { buf = await next; } catch (e) { log('tts ctx x ' + (e && e.message)); return false; }
+      if (gen !== sayGen) return true;
+      if (i + 1 < parts.length) next = get(parts[i + 1]);   // fetch the next part while this one plays
+      next.catch(() => { });
+      if (ctx.state !== 'running') { try { await within(ctx.resume(), 1500); } catch { } }
+      if (ctx.state !== 'running') { log('tts ctx ' + ctx.state); return false; }
+      await new Promise((done) => {
+        const src = ctxSrc = ctx.createBufferSource();
+        src.buffer = buf;
+        if (cfg.rate > 1.05) src.playbackRate.value = cfg.rate;   // slower speech is asked from Google instead
+        src.connect(ctx.destination);
+        let fin = false;
+        const end = () => { if (fin) return; fin = true; clearInterval(chk); clearTimeout(guard); if (ctxSrc === src) ctxSrc = null; done(); };
+        const chk = setInterval(() => { if (gen !== sayGen) { try { src.stop(); } catch { } end(); } }, 100);
+        const guard = setTimeout(end, (buf.duration / Math.max(1, cfg.rate)) * 1000 + 2000);
+        src.onended = end;
+        src.start();
+      });
+      if (gen !== sayGen) return true;
+    }
+    return true;
+  }
   function stopSound() {
     sayGen++;
     try { if (synth && (synth.speaking || synth.pending)) synth.cancel(); } catch { }
     try { au.pause(); au.onended = au.onerror = null; } catch { }
+    try { if (ctxSrc) ctxSrc.stop(); } catch { }
   }
   async function speak(text, l) {
     stopSound();
-    const gen = sayGen, v = voiceFor(l);
-    let ok = false;
-    if (v) ok = await speakSynth(text, v, gen);
-    if (!ok && gen === sayGen) ok = await speakNet(text, l, gen);
+    const gen = sayGen, t0 = now();
+    let ok = false, how = 'ctx';
+    if (IOS && mode) ok = await speakCtx(text, l, gen);
+    const v = !ok && gen === sayGen ? voiceFor(l) : null;
+    if (v) { how = 'device'; ok = await speakSynth(text, v, gen); }
+    if (!ok && gen === sayGen) { how = 'google'; ok = await speakNet(text, l, gen); }
+    log('tts ' + l.k + ' ' + how + ' ' + (ok ? 'ok' : 'x') + ' ' + ((now() - t0) / 1000).toFixed(1) + 's');
     return ok && gen === sayGen;
   }
   async function speakLine(it, w) {
@@ -427,85 +503,121 @@
     const q = live.x && live.qx === live.x && norm(live.x) === norm(text) ? live.q : '';
     liveDrop();
     const sk = s === 'a' ? cfg.a : cfg.b, tk = s === 'a' ? cfg.b : cfg.a;
+    log('line ' + s + ' ' + by + ' ' + text.length + 'ch');
+    stillHere();
     addLine({ s, sk, tk, x: text, q, by });
   }
+  // talking counts as using the app: keeps the portal's idle PIN lock away during a long conversation
+  function stillHere() { try { if (window.AMATU && window.AMATU.touch) window.AMATU.touch(); } catch { } }
 
+  // Web Speech. Chrome sends a final result at every pause; Safari (iPhone/iPad/Mac) keeps one growing result and
+  // never marks it final until the session ends, so a pause of its own ends the sentence there. Each session's
+  // text is followed by what has already become a line (sent), so a sentence is never sent twice.
+  let srUp = false, srAsk = 0;   // a session is running / when start() was last asked for
+  function srKick(r) {
+    srAsk = now();
+    try { r.start(); } catch (e) { log('sr start x ' + (e && e.name)); }
+  }
   function srStart(s) {
     const l = L(s === 'a' ? cfg.a : cfg.b);
     const r = rec = new SRC();
     r.lang = l.sr;
     r.interimResults = true;
-    r.continuous = !ANDROID;   // Android's continuous mode repeats results; it restarts after each sentence instead
+    // Android's continuous mode repeats results and Safari's often stops delivering them without any error
+    // (WebKit bug 225298): both get one sentence per session and are restarted after it
+    r.continuous = !(ANDROID || IOS);
     r.maxAlternatives = 1;
-    eng = 'sr';
-    let got = false, mute = 0;   // results this activation / sessions in a row that heard nothing
-    let since = 0, forcing = false;   // when the current unfinished sentence started
-    const toEar = () => { srBad.add(l.sr); rec = null; try { r.abort(); } catch { } earStart(s); };
-    r.onstart = () => { recT0 = now(); paintMics(); };
+    eng = 'sr'; srUp = false;
+    let got = false, mute = 0, sawFinal = false;   // anything heard / sessions in a row that heard nothing
+    let sent = '', last = '', quietT = 0;
+    const words = (t) => (t.trim() ? t.trim().split(/\s+/) : []);
+    const rest = (all) => {   // the part of this session's text that isn't a line yet
+      if (!sent) return all.trim();
+      if (all.startsWith(sent)) return all.slice(sent.length).trim();
+      // the recognizer rewrote words it had already given (punctuation, capitals): skip as many words as were sent
+      return /\s/.test(sent) ? words(all).slice(words(sent).length).join(' ') : all.slice(sent.length).trim();
+    };
+    const commit = (all) => {
+      clearTimeout(quietT);
+      const fresh = rest(all);
+      sent = all;
+      if (fresh) heard(s, fresh, 'mic'); else liveDrop();
+    };
+    r._flush = () => { if (last && rest(last)) commit(last); };
+    const toEar = (why) => {
+      log('sr->ear ' + why);
+      clearTimeout(quietT);
+      srBad.add(l.sr); rec = null; srUp = false;
+      try { r.abort(); } catch { }
+      if (l.w && aiOn()) earStart(s);
+      else { stopAll(); toast('Pengenalan suara tidak tersedia di browser ini — silakan ketik'); }
+    };
+    r._toEar = toEar;
+    r.onstart = () => { if (r !== rec) return; srUp = true; recT0 = now(); sent = ''; last = ''; log('sr on'); paintMics(); };
     r.onresult = (e) => {
       if (r !== rec) return;
-      got = true; mute = 0;
-      let interim = '';
-      for (let i = e.resultIndex; i < e.results.length; i++) {
-        const res = e.results[i], t = (res[0] && res[0].transcript) || '';
-        if (res.isFinal) { heard(s, t, 'mic'); since = 0; }
-        else interim += t;
+      got = true; mute = 0; recFails = 0;
+      let all = '', fin = '';
+      for (let i = 0; i < e.results.length; i++) {
+        const res = e.results[i], t = ((res[0] && res[0].transcript) || '').trim();
+        if (t) all += (all ? ' ' : '') + t;
+        if (res.isFinal) { fin = all; sawFinal = true; }
       }
-      if (interim.trim()) {
-        liveSet(s, interim);
-        if (!since) since = now();
-        // someone talking on and on (or a noisy room) never gets a final result: stopping makes the
-        // recognizer hand over what it has; onend starts it again at once
-        if (!forcing && (now() - since > 12000 || interim.length > 220)) { forcing = true; try { r.stop(); } catch { } }
+      last = all;
+      if (fin) {
+        if (rest(fin)) commit(fin);
+        else if (!fin.startsWith(sent) || fin.length < sent.length) sent = fin;   // a pause already sent it
       }
-      recFails = 0;
+      const pending = rest(all);
+      if (!pending) return;
+      liveSet(s, pending);
+      clearTimeout(quietT);
+      if (pending.length > 220) return commit(all);   // someone talking on and on without a pause
+      // Chrome sends its own finals; there the timer is only a backstop for a noisy room
+      quietT = setTimeout(() => { if (r === rec && !recHold) commit(last); }, sawFinal ? 4000 : 1200);
     };
     r.onerror = (e) => {
       if (r !== rec) return;
       const er = e.error;
+      log('sr err ' + er);
       if (er === 'aborted') return;
       if (er === 'no-speech') {
         // a recognizer that never hears anything (seen: it listened to another input than the page's mic)
-        if (!got && ++mute >= 3 && l.w && aiOn()) toEar();
+        if (!got && ++mute >= 3) toEar('silent');
         return;
       }
       if (er === 'audio-capture') { stopAll(); return toast('Mikrofon tidak ditemukan'); }
       if (er === 'not-allowed' && !IOS) { stopAll(); return toast('Izinkan akses mikrofon untuk situs ini'); }
       // network / service-not-allowed / language-not-supported / iPhone with Siri off → own recorder + Whisper
-      if (l.w && aiOn()) toEar();
-      else { srBad.add(l.sr); rec = null; try { r.abort(); } catch { } stopAll(); toast('Pengenalan suara tidak tersedia di browser ini — silakan ketik'); }
+      toEar(er);
     };
     r.onend = () => {
       if (r !== rec) return;
-      if (live.x) heard(s, live.x, 'mic');   // phones may end without turning the last words final
-      since = 0;
-      const forced = forcing;
-      forcing = false;
+      srUp = false;
+      if (last && rest(last)) commit(last);   // Safari only finishes the last words when the session ends
+      liveDrop();
+      log('sr end');
       if (mode !== s || eng !== 'sr' || recHold) return;
-      if (forced) { try { r.start(); } catch { } return; }
       const fast = now() - recT0 < 1500;
       recFails = fast ? recFails + 1 : 0;
-      if (recFails > 6) {   // keeps dying at once: switch to the recorder
-        srBad.add(l.sr); rec = null;
-        if (l.w && aiOn()) return earStart(s);
-        stopAll(); return toast('Mikrofon berhenti — ketuk lagi untuk lanjut');
-      }
-      setTimeout(() => { if (rec === r && mode === s && !recHold) { try { r.start(); } catch { } } }, fast ? 300 * recFails : 80);
+      if (recFails > 6) return toEar('dies');   // keeps dying at once
+      setTimeout(() => { if (rec === r && mode === s && !recHold && !srUp) srKick(r); }, fast ? 300 * recFails : 80);
     };
-    try { r.start(); } catch { setTimeout(() => { try { r.start(); } catch { } }, 300); }
+    srKick(r);
   }
 
   // own recorder: mic → 16 kHz → voice activity detection → one WAV per utterance → Whisper
   const Ear = (() => {
     const RATE = 16000, FR = 320;                                      // 20 ms frames
     const PRE = 15, START = 3, END_SIL = 32, MIN_VOICE = 12, MAX = 1100; // 300 ms pre-roll, 640 ms pause ends it, max 22 s
-    const WORKLET = "class T extends AudioWorkletProcessor{constructor(){super();this.b=new Float32Array(2048);this.n=0}process(i){const c=i[0]&&i[0][0];if(c){for(let k=0;k<c.length;k++){this.b[this.n++]=c[k];if(this.n===2048){this.port.postMessage(this.b.slice(0));this.n=0}}}return true}}registerProcessor('tr-tap',T)";
-    let ctx = null, stream = null, src = null, node = null, sink = null, wl = false;
-    let on = false, mute = false, h = {};
+    let ctx = null, stream = null, src = null, node = null, sink = null, wl = null;
+    let on = false, mute = false, busy = false, h = {}, lastFrame = 0, frames = 0;
     let carry = 0, sum = 0, cnt = 0, fb = new Float32Array(FR), fn = 0;
     let floor = -58, talking = false, pre = [], utt = [], voiced = 0, sil = 0, hot = 0, lvAt = 0;
     function reset() { talking = false; pre = []; utt = []; voiced = 0; sil = 0; hot = 0; carry = 0; sum = 0; cnt = 0; fn = 0; }
     function feed(x) {
+      lastFrame = now();
+      if (!frames++) log('ear first audio ' + (ctx && ctx.sampleRate) + 'Hz');
       if (!on || mute) return;
       const r = ctx.sampleRate / RATE;
       for (let i = 0; i < x.length; i++) {
@@ -547,50 +659,101 @@
         h.utter && h.utter(pcm);
       }
     }
-    async function open() {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } });
-      if (!ctx) ctx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 'interactive' });
-      if (ctx.state !== 'running') { try { await ctx.resume(); } catch { } }
-      src = ctx.createMediaStreamSource(stream);
-      if (ctx.audioWorklet && window.AudioWorkletNode) {
-        if (!wl) { await ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([WORKLET], { type: 'text/javascript' }))); wl = true; }
-        node = new AudioWorkletNode(ctx, 'tr-tap');
-        node.port.onmessage = (e) => feed(e.data);
-      } else {
-        node = ctx.createScriptProcessor(2048, 1, 1);
-        node.onaudioprocess = (e) => feed(e.inputBuffer.getChannelData(0));
+    const mk = () => new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 'interactive' });
+    // getUserMedia that can't hang us: a permission prompt nobody answers, or a late answer, never leaves the mic on
+    function gum(ms) {
+      return new Promise((ok, no) => {
+        let late = false;
+        const t = setTimeout(() => { late = true; no(Object.assign(new Error('mic timeout'), { name: 'TimeoutError' })); }, ms);
+        navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } })
+          .then((s) => { clearTimeout(t); if (late) s.getTracks().forEach((x) => x.stop()); else ok(s); }, (e) => { clearTimeout(t); no(e); });
+      });
+    }
+    async function wake() {   // a context that iOS left suspended (made outside a tap) or interrupted (after speech)
+      if (ctx.state !== 'running') { try { await within(ctx.resume(), 1500); } catch { } }
+      return ctx.state === 'running';
+    }
+    async function open(first) {
+      busy = true;
+      try {
+        stream = await gum(first ? 90000 : 8000);
+        if (!ctx || ctx.state === 'closed') { ctx = mk(); wl = null; }
+        if (!(await wake())) {
+          // iPhone: a fresh context may start while the mic is open
+          log('ear ctx ' + ctx.state + ' -> new');
+          try { ctx.close(); } catch { }
+          ctx = mk(); wl = null;
+          await wake();
+        }
+        log('ear open ' + ctx.state + ' ' + ctx.sampleRate + 'Hz');
+        if (ctx.state !== 'running') throw Object.assign(new Error('audio suspended'), { name: 'Suspended' });
+        src = ctx.createMediaStreamSource(stream);
+        node = null;
+        if (ctx.audioWorklet && window.AudioWorkletNode) {
+          try {
+            if (wl !== ctx) { await within(ctx.audioWorklet.addModule('tap-worklet.js?v=1'), 5000); wl = ctx; }
+            node = new AudioWorkletNode(ctx, 'tr-tap');
+            node.port.onmessage = (e) => feed(e.data);
+          } catch (e) { log('worklet x ' + (e && e.name)); node = null; }
+        }
+        if (!node) {
+          node = ctx.createScriptProcessor(2048, 1, 1);
+          node.onaudioprocess = (e) => feed(e.inputBuffer.getChannelData(0));
+        }
+        sink = ctx.createGain();
+        sink.gain.value = 0;
+        src.connect(node); node.connect(sink); sink.connect(ctx.destination);
+        lastFrame = now();
+      } catch (e) {
+        close();
+        throw e;
+      } finally {
+        busy = false;
       }
-      sink = ctx.createGain();
-      sink.gain.value = 0;
-      src.connect(node); node.connect(sink); sink.connect(ctx.destination);
     }
     function close() {
       try { if (src) src.disconnect(); if (node) node.disconnect(); if (sink) sink.disconnect(); } catch { }
       if (node && node.port) node.port.onmessage = null;
+      if (node) node.onaudioprocess = null;
       src = node = sink = null;
       if (stream) stream.getTracks().forEach((t) => t.stop());
       stream = null;
     }
     return {
       get on() { return on; },
-      async start(handlers) { h = handlers || {}; reset(); await open(); on = true; mute = false; },
+      // inside the tap itself: iOS only lets an audio context start from a user gesture, and not after an await
+      prime() {
+        try {
+          if (!ctx || ctx.state === 'closed') { ctx = mk(); wl = null; }
+          if (ctx.state !== 'running') { const p = ctx.resume(); if (p && p.catch) p.catch(() => { }); }
+        } catch (e) { log('prime x ' + (e && e.name)); }
+      },
+      async start(handlers) { h = handlers || {}; reset(); frames = 0; await open(true); on = true; mute = false; },
       stop(keep) {   // keep = send what the speaker said before the tap
         if (keep && talking && voiced >= MIN_VOICE) { sil = 0; finish(false); }
         on = false; reset(); close();
         if (ctx && ctx.state === 'running' && !IOS) ctx.suspend().catch(() => { });
       },
-      // while a translation is read aloud: ignore the mic; an iPhone also has to let go of it, else the
-      // voice comes out of the earpiece
+      // while a translation is read aloud: ignore the mic; a phone also has to let go of it, else the voice comes
+      // out of the earpiece (iOS keeps the record-and-play mode while a microphone is open)
       async hold(v) {
         if (!on) return;
         if (v && talking && voiced >= MIN_VOICE) { sil = 0; finish(false); }   // send what was said so far
         mute = v; reset();
-        if (!IOS) return;
-        if (v) close();
-        else {
-          try { await open(); } catch { on = false; h.state && h.state('lost'); }
-        }
+        if (!PHONE) return;
+        if (v) { close(); return; }
+        try { await open(false); } catch (e) { log('reopen x ' + (e && e.name)); on = false; h.state && h.state('lost'); }
       },
+      // the microphone really delivers sound (the supervisor asks every 1.5 s)
+      alive() { return !on || mute || busy || now() - lastFrame < 2500; },
+      async revive() {
+        if (!on || busy) return;
+        if (ctx && ctx.state !== 'running' && (await wake())) { log('ear resumed'); lastFrame = now(); return; }
+        close();
+        try { await open(false); } catch (e) { log('revive x ' + (e && e.name)); on = false; h.state && h.state('lost'); }
+      },
+      info() { return (ctx ? ctx.state : 'none') + ' frames ' + frames + (stream ? ' mic' : ' nomic'); },
+      ctx: () => ctx,
     };
   })();
 
@@ -614,17 +777,22 @@
     eng = 'ear';
     phSide = s;
     paintMics();
+    log('ear start ' + s);
     Ear.start({
       state: (st) => {
         if (st === 'talk') { phTalk = true; phPaint(); }
         else if (st === 'idle') { phTalk = false; phPaint(); }
-        else if (st === 'lost') { stopAll(); toast('Mikrofon terlepas — ketuk lagi untuk lanjut'); }
+        else if (st === 'lost') { log('ear lost'); needTap(); }
       },
       level: (v) => { const b = micEl(mode); if (b) b.style.setProperty('--lv', v.toFixed(2)); if (ph) ph.style.setProperty('--lv', v.toFixed(2)); },
       utter: (pcm) => onUtter(s, pcm),
     }).catch((e) => {
-      if (mode === s) stopAll();
-      toast(e && e.name === 'NotAllowedError' ? 'Izinkan akses mikrofon untuk situs ini' : 'Mikrofon tidak bisa dibuka');
+      const n = (e && e.name) || 'Error';
+      log('ear start x ' + n);
+      if (mode !== s || eng !== 'ear') return;
+      if (n === 'NotAllowedError' || n === 'SecurityError') { stopAll(); return toast('Izinkan akses mikrofon untuk situs ini'); }
+      if (n === 'NotFoundError') { stopAll(); return toast('Mikrofon tidak ditemukan'); }
+      needTap();   // iPhone wants one more tap before it lets the page record
     });
   }
   function onUtter(s, pcm) {
@@ -674,42 +842,117 @@
     if (!mode) return;
     if (eng === 'sr' && rec) {
       recHold = v;
-      if (v) { try { rec.abort(); } catch { } liveDrop(); }
-      else { await sleep(250); if (rec && mode && !recHold) { try { rec.start(); } catch { } } }
+      if (v) {
+        if (rec._flush) rec._flush();   // the words of someone still talking become a line first
+        try { rec.abort(); } catch { }
+        liveDrop();
+      } else { await sleep(250); if (rec && mode && !recHold && !srUp) srKick(rec); }
     } else if (eng === 'ear') await Ear.hold(v);
+    // a phone needs a moment to switch from recording to playing: speech started earlier comes out of the
+    // earpiece, quietly (iOS lags several hundred ms after the microphone is released)
+    if (v && PHONE) await sleep(IOS ? 650 : 250);
     paintStatus();
   }
 
+  // ---------- tetap mendengarkan ----------
+  // Screen stays on while listening: phones otherwise sleep after ~30 s without a touch, and a page in the
+  // background loses the microphone.
+  const Wake = (() => {
+    let lock = null, want = false;
+    async function get() {
+      if (!want || lock || document.visibilityState !== 'visible' || !('wakeLock' in navigator)) return;
+      try {
+        lock = await navigator.wakeLock.request('screen');
+        lock.addEventListener('release', () => { lock = null; });
+        if (!want) { lock.release().catch(() => { }); lock = null; }
+      } catch (e) { log('wake x ' + (e && e.name)); }
+    }
+    document.addEventListener('visibilitychange', get);
+    return {
+      on() { want = true; get(); },
+      off() { want = false; const l = lock; lock = null; if (l) l.release().catch(() => { }); },
+    };
+  })();
+
+  // one tap brings listening back where a phone needs a fresh tap (audio blocked, mic lost, app was in the background)
+  let askMode = '';
+  function needTap(m) {
+    const was = m || mode;
+    if (mode) stopAll(true);
+    if (!was) return;
+    askMode = was;
+    const b = $('#resume');
+    b.hidden = false;
+    b.querySelector('span').textContent = 'Ketuk untuk lanjut mendengarkan';
+    log('tap asked ' + was);
+    saveDbg();
+    paintStatus();
+  }
+  function hideTap() { askMode = ''; $('#resume').hidden = true; }
+
+  // supervisor: while a mode is on something must really be listening, else it is restarted (twice), then the
+  // other engine or the tap button takes over — nothing may go quiet without the user seeing it
+  let fixN = 0;
+  setInterval(() => {
+    if (!mode || document.hidden || saying || recHold) return;
+    stillHere();
+    if (eng === 'sr') {
+      if (srUp) { fixN = 0; return; }
+      if (!rec || now() - srAsk < 3500) return;
+      log('sr silent ' + fixN);
+      if (++fixN <= 2) return srKick(rec);
+      fixN = 0;
+      if (rec._toEar) rec._toEar('stuck'); else needTap();
+    } else if (eng === 'ear') {
+      if (Ear.alive()) { fixN = 0; return; }
+      log('ear no audio ' + Ear.info());
+      if (++fixN <= 2) { Ear.revive(); return; }
+      fixN = 0;
+      needTap();
+    }
+  }, 1500);
+
   async function toggle(m) {
+    // all of this runs inside the tap, before anything waits: iOS only allows sound and audio processing then
     unlock();
+    Ear.prime();
+    hideTap();
     if (mode === m) { stopAll(true); return; }
     stopAll(true);
     stopSound();
     if (!cur) newSession();
     mode = m;
+    fixN = 0;
+    Wake.on();
+    log('mode ' + m);
     if (m === 'o') {
       if (!aiOn()) {
-        mode = ''; paintMics();
+        mode = ''; Wake.off(); paintMics();
         return toast(tok() ? 'Mode Auto sedang tidak tersedia — pakai tombol bahasa' : 'Mode Auto perlu masuk ke Portal AMATU');
       }
       earStart('o');
       return paintMics();
     }
     const l = L(m === 'a' ? cfg.a : cfg.b);
+    // iPhone/iPad: own recorder + Whisper. Safari's speech recognition stops delivering results without any
+    // error in continuous use (it is still the fallback when the AI is unavailable).
+    if (IOS && l.w && aiOn()) { earStart(m); return paintMics(); }
     if (SRC && l.sr && !srBad.has(l.sr)) { srStart(m); return paintMics(); }
     if (l.w && aiOn()) { earStart(m); return paintMics(); }
-    mode = ''; paintMics();
+    mode = ''; Wake.off(); paintMics();
     toast(`${l.n} belum bisa lewat suara di browser ini — silakan ketik`);
   }
   function stopAll(keep) {
     const was = mode, e = eng;
-    mode = ''; eng = ''; recHold = false;
-    if (rec) { const r = rec; rec = null; try { r.abort(); } catch { } }
+    mode = ''; eng = ''; recHold = false; srUp = false;
+    if (rec) { const r = rec; rec = null; if (r._flush && keep) r._flush(); try { r.abort(); } catch { } }
     if (live.x && was && was !== 'o') heard(was, live.x, 'mic'); else liveDrop();
     if (e === 'ear') Ear.stop(keep);
+    Wake.off();
     phTalk = false; phPaint();
     const b = micEl(was); if (b) b.style.removeProperty('--lv');
     paintMics();
+    if (was) { log('stop ' + was); saveDbg(); }
     if (dirty) save();
   }
 
@@ -733,7 +976,8 @@
   }
   function paintStatus() {
     let t = '';
-    if (saying) t = 'Membacakan terjemahan…';
+    if (askMode) t = '';
+    else if (saying) t = 'Membacakan terjemahan…';
     else if (pending && !phTalk) t = 'Menerjemahkan…';
     else if (mode === 'o') t = `Mendengarkan ${L(cfg.a).n} & ${L(cfg.b).n} — bicara saja`;
     else if (mode) t = `Mendengarkan ${L(mode === 'a' ? cfg.a : cfg.b).n}… ketuk lagi untuk berhenti`;
@@ -1114,12 +1358,14 @@
       if (s && Array.isArray(s.items) && !cur.items.some((it) => it.st)) { cur.items = s.items.map((it) => Object.assign({}, it, { st: 0 })); render(); }
     } else if (e.key.startsWith('translator.s.')) textCache.delete(e.key.slice(13));
   });
-  window.addEventListener('pagehide', () => flush());
+  window.addEventListener('pagehide', () => { flush(); if (DBG.length) saveDbg(); });
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState !== 'hidden') return;
     flush();
-    if (PHONE && mode) stopAll(true);   // phones cut the mic of a page in the background anyway
+    // phones cut the mic of a page in the background anyway: on return one tap carries on
+    if (PHONE && mode) { log('hidden'); needTap(mode); }
   });
+  $('#resume').addEventListener('click', () => { const m = askMode || 'o'; toggle(m); });
 
   // ---------- mulai ----------
   applyFs();
@@ -1131,5 +1377,5 @@
   render();
   renderHist();
   // debug hook (read-only state)
-  window.TRANSLATOR = { get cfg() { return cfg; }, get cur() { return cur; }, get mode() { return mode; }, get eng() { return eng; }, aiOn, voiceFor: (k) => voiceFor(L(k)) };
+  window.TRANSLATOR = { get cfg() { return cfg; }, get cur() { return cur; }, get mode() { return mode; }, get eng() { return eng; }, aiOn, voiceFor: (k) => voiceFor(L(k)), log: () => DBG.join('\n'), ear: () => Ear.info() };
 })();
