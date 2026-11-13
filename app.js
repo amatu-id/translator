@@ -835,11 +835,16 @@
   function setLang(side, k) {
     if (mode) stopAll(true);
     const other = side === 'a' ? cfg.b : cfg.a;
-    if (k === other) [cfg.a, cfg.b] = [cfg.b, cfg.a];
+    const swap = k === other, same = k === cfg[side];
+    if (swap) [cfg.a, cfg.b] = [cfg.b, cfg.a];
     else cfg[side] = k;
     cfg.recent = [k, ...cfg.recent.filter((x) => x !== k)].slice(0, 8);
     saveCfg();
-    if (cur) { cur.a = cfg.a; cur.b = cfg.b; if (cur.items.length) save(); }
+    // a new language pair is a new conversation: the one so far keeps its own languages in the history
+    if (cur && cur.items.length && !swap && !same) {
+      flush(); stopSound(); newSession(); render(); renderHist();
+      toast(`Percakapan baru: ${L(cfg.a).n} ⇄ ${L(cfg.b).n}`);
+    } else if (cur) { cur.a = cfg.a; cur.b = cfg.b; if (cur.items.length) save(); }
     paintLangs();
   }
 
