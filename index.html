@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<script src="/amatu.js"></script>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<title>Amatu Translator</title>
+<meta name="description" content="Terjemahan suara langsung ke semua bahasa, dengan riwayat percakapan.">
+<meta name="theme-color" content="#f5f6fa" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0c0e14" media="(prefers-color-scheme: dark)">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%233a5bff'/%3E%3Cstop offset='1' stop-color='%236a4dff'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='64' height='64' rx='16' fill='url(%23g)'/%3E%3Cpath d='M14 18h22a4 4 0 0 1 4 4v10a4 4 0 0 1-4 4H26l-7 6v-6h-5a4 4 0 0 1-4-4V22a4 4 0 0 1 4-4z' fill='%23fff'/%3E%3Cpath d='M44 28h6a4 4 0 0 1 4 4v10a4 4 0 0 1-4 4h-2v5l-6-5h-8a4 4 0 0 1-4-4v-2' fill='none' stroke='%23fff' stroke-width='3' stroke-linejoin='round' opacity='.75'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="app.css?v=1">
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-mic" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/></symbol>
+  <symbol id="i-wave" viewBox="0 0 24 24"><path d="M4 10v4M8 6v12M12 3v18M16 7v10M20 10v4"/></symbol>
+  <symbol id="i-hist" viewBox="0 0 24 24"><path d="M3.5 12a8.5 8.5 0 1 0 2.6-6.1L3.5 8.5"/><path d="M3.5 4v4.5H8M12 7.5V12l3 2"/></symbol>
+  <symbol id="i-new" viewBox="0 0 24 24"><path d="M12 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-6"/><path d="M17.6 3.6a2 2 0 0 1 2.8 2.8L12 14.8 8.5 15.5l.7-3.5z"/></symbol>
+  <symbol id="i-vol" viewBox="0 0 24 24"><path d="M11 5 6.5 9H3.5v6h3L11 19z"/><path d="M15.5 9a4.5 4.5 0 0 1 0 6M18.5 6a8.5 8.5 0 0 1 0 12"/></symbol>
+  <symbol id="i-voloff" viewBox="0 0 24 24"><path d="M11 5 6.5 9H3.5v6h3L11 19z"/><path d="m16 9.5 5 5M21 9.5l-5 5"/></symbol>
+  <symbol id="i-set" viewBox="0 0 24 24"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/></symbol>
+  <symbol id="i-swap" viewBox="0 0 24 24"><path d="M4 8h15l-3.5-3.5M20 16H5l3.5 3.5"/></symbol>
+  <symbol id="i-send" viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6"/></symbol>
+  <symbol id="i-stop" viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="2.5" fill="currentColor"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2.5"/><path d="M5 15V6.5A2.5 2.5 0 0 1 7.5 4H15"/></symbol>
+  <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5.5" cy="12" r="1.3" fill="currentColor"/><circle cx="12" cy="12" r="1.3" fill="currentColor"/><circle cx="18.5" cy="12" r="1.3" fill="currentColor"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M9.5 7V4.5h5V7M6 7l1 12.5a1.5 1.5 0 0 0 1.5 1.5h7a1.5 1.5 0 0 0 1.5-1.5L18 7"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="m20 20-4.2-4.2"/></symbol>
+  <symbol id="i-chev" viewBox="0 0 24 24"><path d="m7 10 5 5 5-5"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7.5"/></symbol>
+  <symbol id="i-down" viewBox="0 0 24 24"><path d="M12 4v11M7 10.5l5 5 5-5M5 20h14"/></symbol>
+  <symbol id="i-chat" viewBox="0 0 24 24"><path d="M4 5.5h11a2 2 0 0 1 2 2V13a2 2 0 0 1-2 2H9.5L6 18v-3H4a2 2 0 0 1-2-2V7.5a2 2 0 0 1 2-2z"/><path d="M20 9.5a2 2 0 0 1 2 2V17a2 2 0 0 1-2 2h-1v2.5L16 19h-4.5a2 2 0 0 1-1.6-.8"/></symbol>
+</svg>
+
+<div id="app">
+  <aside id="hist" class="hist" aria-label="Riwayat">
+    <div class="hh">
+      <div class="hh-t">Riwayat</div>
+      <button class="ib" id="hNew" title="Percakapan baru"><svg class="i"><use href="#i-new"/></svg></button>
+      <button class="ib mob" id="hClose" title="Tutup"><svg class="i"><use href="#i-x"/></svg></button>
+    </div>
+    <label class="srch"><svg class="i sm"><use href="#i-search"/></svg><input id="hq" type="search" placeholder="Cari di riwayat" autocomplete="off" enterkeyhint="search"></label>
+    <div id="hl" class="hl"></div>
+    <div class="hf"><button id="hAll" class="lnk">Hapus semua riwayat</button></div>
+  </aside>
+  <div id="scrim" class="scrim"></div>
+
+  <main class="main">
+    <header class="top">
+      <button class="ib" id="bHist" title="Riwayat"><svg class="i"><use href="#i-hist"/></svg></button>
+      <div class="brand">Translator</div>
+      <button class="ib" id="bNew" title="Percakapan baru"><svg class="i"><use href="#i-new"/></svg></button>
+      <button class="ib" id="bSpk" title="Bacakan otomatis"><svg class="i"><use href="#i-vol"/></svg></button>
+      <button class="ib" id="bSet" title="Pengaturan"><svg class="i"><use href="#i-set"/></svg></button>
+    </header>
+
+    <div class="pair">
+      <button class="lang" id="la" title="Pilih bahasa pertama"><i class="dot a"></i><span></span><svg class="i sm"><use href="#i-chev"/></svg></button>
+      <button class="swap" id="swap" title="Tukar bahasa"><svg class="i"><use href="#i-swap"/></svg></button>
+      <button class="lang" id="lb" title="Pilih bahasa kedua"><i class="dot b"></i><span></span><svg class="i sm"><use href="#i-chev"/></svg></button>
+    </div>
+
+    <section id="conv" class="conv" aria-live="polite"><div id="cw" class="cw"></div></section>
+
+    <footer class="dock" id="dock">
+      <form id="typ" class="typ" autocomplete="off">
+        <textarea id="tx" rows="1" placeholder="Ketik untuk menerjemahkan…" enterkeyhint="send" aria-label="Teks yang mau diterjemahkan"></textarea>
+        <button type="button" class="tb" id="bSay" title="Terjemahkan lalu bacakan"><svg class="i"><use href="#i-vol"/></svg></button>
+        <button type="submit" class="tb send" id="bSend" title="Terjemahkan"><svg class="i"><use href="#i-send"/></svg></button>
+      </form>
+      <div class="mics">
+        <button class="mic side a" id="ma"><span class="ring"></span><svg class="i"><use href="#i-mic"/></svg><span class="ml"></span></button>
+        <button class="mic auto" id="mo" title="Auto: bahasa dikenali otomatis"><span class="ring"></span><svg class="i"><use href="#i-wave"/></svg><span class="ml">Auto</span></button>
+        <button class="mic side b" id="mb"><span class="ring"></span><svg class="i"><use href="#i-mic"/></svg><span class="ml"></span></button>
+      </div>
+      <div class="status" id="st"></div>
+    </footer>
+  </main>
+</div>
+
+<div id="sheet" class="sheet" hidden><div class="card" role="dialog" aria-modal="true"></div></div>
+<div id="pop" class="pop" hidden></div>
+<div id="toast" class="toast" role="status"></div>
+
+<script src="langs.js?v=1"></script>
+<script src="app.js?v=1"></script>
+</body>
+</html>
