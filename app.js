@@ -1041,16 +1041,17 @@
     }
   }
 
-  // iPhone keyboard: keep the dock above it
+  // phone keyboard: keep the dock above it (/amatu.js rewrites the viewport meta without interactive-widget, so
+  // Android, like iOS, only shrinks the visual viewport)
   const vv = window.visualViewport;
   function fitVV() {
     const app = $('#app');
-    if (!vv || !IOS || document.activeElement !== tx) { app.style.height = ''; app.style.transform = ''; return; }
+    if (!vv || !PHONE || document.activeElement !== tx || vv.height > innerHeight - 40) { app.style.height = ''; app.style.transform = ''; return; }
     app.style.height = vv.height + 'px';
     app.style.transform = vv.offsetTop ? `translateY(${vv.offsetTop}px)` : '';
     scrollEnd(true);
   }
-  if (vv && IOS) { vv.addEventListener('resize', fitVV); vv.addEventListener('scroll', fitVV); }
+  if (vv && PHONE) { vv.addEventListener('resize', fitVV); vv.addEventListener('scroll', fitVV); }
 
   // ---------- kabel ----------
   $('#ma').addEventListener('click', () => toggle('a'));
